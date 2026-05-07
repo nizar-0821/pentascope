@@ -1,0 +1,49 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Syncopate:wght@400;700&display=swap');
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #09090b; /* Deep black */
+  color: #f8fafc;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+.neo-title {
+  font-family: 'Syncopate', sans-serif;
+  text-transform: uppercase;
+  letter-spacing: -1px;
+}
+
+.neo-button {
+  background: transparent;
+  color: #38bdf8;
+  font-family: 'Syncopate', sans-serif;
+  font-weight: 700;
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  border-radius: 4px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 0 15px rgba(56, 189, 248, 0.15) inset;
+}
+
+.neo-button:hover {
+  background: rgba(56, 189, 248, 0.1);
+  box-shadow: 0 0 25px rgba(56, 189, 248, 0.4), 0 0 15px rgba(56, 189, 248, 0.2) inset;
+}
+
+.logo-icon {
+  animation: slow-spin 20s linear infinite;
+}
+
+@keyframes slow-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
