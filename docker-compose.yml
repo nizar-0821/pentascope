@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - FLASK_DEBUG=false
+      - FLASK_HOST=0.0.0.0
+      - ALLOWED_ORIGINS=http://localhost:3000
+    volumes:
+      - ./backend/reports:/app/reports
+      - ./backend/instance:/app/instance
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        - REACT_APP_API_URL=http://localhost:5000
+    ports:
+      - "3000:80"

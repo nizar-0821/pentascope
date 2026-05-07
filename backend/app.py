@@ -46,6 +46,29 @@ def validate_target(target: str) -> bool:
     except Exception:
         return False
 
+def check_scope(target: str) -> tuple[bool, str]:
+    """Check if scanning is allowed (e.g. by checking robots.txt)."""
+    import requests
+    try:
+        parsed = urlparse(target)
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        r = requests.get(robots_url, timeout=5)
+        if r.status_code == 200:
+            if "User-agent: *" in r.text and "Disallow: /" in r.text:
+                return False, "Target robots.txt globally disallows crawling (Disallow: /)."
+        # Add basic private IP check
+        import ipaddress
+        import socket
+        try:
+            ip = socket.gethostbyname(parsed.netloc.split(':')[0])
+            if ipaddress.ip_address(ip).is_private:
+                return False, f"Target resolves to a private IP ({ip}). Please confirm authorization."
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return True, "Target is in scope."
+
 def count_severities(vulns: list) -> dict:
     """Count findings by severity level. Returns lowercase keys for DB model."""
     return {
@@ -204,6 +227,13 @@ def scan_with_progress():
     target = data.get('target', '').strip()
     if not target or not validate_target(target):
         return jsonify({"error": "A valid http/https target URL is required"}), 400
+
+    # Scope Check
+    is_allowed, scope_msg = check_scope(target)
+    if not is_allowed:
+        # Check if user explicitly bypasses via a flag (e.g. force=True)
+        if not data.get('force', False):
+             return jsonify({"error": "Scope/Authorization Check Failed", "details": scope_msg, "requires_force": True}), 403
 
     # Use UUID instead of timestamp — prevents key collisions
     scan_id = str(uuid.uuid4())
