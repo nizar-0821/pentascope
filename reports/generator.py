@@ -4,6 +4,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, KeepTogether, PageBreak
 from reportlab.lib.units import cm
 from datetime import datetime
+import uuid, os
 
 # Corporate Color Palette
 NAVY    = colors.HexColor("#0f172a") # Slate 900
@@ -81,7 +82,10 @@ def draw_header_footer(canvas, doc):
     canvas.drawRightString(A4[0] - 2*cm, 1.5*cm, f"Page {doc.page}")
     canvas.restoreState()
 
-def generate_report(target, recon_data, vuln_data, output_path="reports/pentest_report.pdf"):
+def generate_report(target: str, recon_data: dict, vuln_data: dict, output_path: str = None) -> str:
+    if output_path is None:
+        os.makedirs("reports", exist_ok=True)
+        output_path = f"reports/report_{uuid.uuid4().hex}.pdf"
     doc = SimpleDocTemplate(output_path, pagesize=A4,
                             leftMargin=2*cm, rightMargin=2*cm,
                             topMargin=2.5*cm, bottomMargin=2.5*cm)

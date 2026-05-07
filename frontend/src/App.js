@@ -5,7 +5,7 @@ import Spline from '@splinetool/react-spline';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Shield, Activity, Target, Lock, FileText, Server, Users, Key, AlertTriangle, ChevronDown, CheckCircle, Database } from 'lucide-react';
 
-const API = "http://localhost:5000";
+const API = process.env.REACT_APP_API_URL || "http://localhost:5000";
 
 const SEV = {
   CRITICAL: { color: "#ff4d4f", bg: "rgba(255, 77, 79, 0.08)", border: "rgba(255, 77, 79, 0.3)" },

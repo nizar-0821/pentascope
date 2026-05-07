@@ -1,82 +1,140 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+from functools import wraps
 from scanner.recon import run_recon
 from scanner.vuln_scan import run_vuln_scan
-import sys, os, json
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+import sys, os, json, threading, uuid
+
+# Add project root to path for reports package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from reports.generator import generate_report
-from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)
+
+# ── Configuration (env-controlled) ─────────────────
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+API_KEY         = os.environ.get("PENTASCOPE_API_KEY", "")  # Empty = disabled (dev mode)
+
+CORS(app, origins=ALLOWED_ORIGINS)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///pentascope.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# ── Model ──────────────────────────────────────────
+# ── Rate Limiting ───────────────────────────────────
+try:
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+    limiter = Limiter(get_remote_address, app=app, default_limits=["60 per minute"])
+    LIMITER_AVAILABLE = True
+except ImportError:
+    LIMITER_AVAILABLE = False
+    print("[!] flask-limiter not installed — rate limiting disabled")
+
+# ── Thread State ────────────────────────────────────
+scan_progress: dict = {}
+scan_lock = threading.Lock()
+
+# ── Helpers ─────────────────────────────────────────
+def validate_target(target: str) -> bool:
+    """Validate that target is a proper HTTP/HTTPS URL with a hostname."""
+    try:
+        parsed = urlparse(target.strip())
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
+
+def count_severities(vulns: list) -> dict:
+    """Count findings by severity level. Returns lowercase keys for DB model."""
+    return {
+        "critical": sum(1 for v in vulns if v.get("severity") == "CRITICAL"),
+        "high":     sum(1 for v in vulns if v.get("severity") == "HIGH"),
+        "medium":   sum(1 for v in vulns if v.get("severity") == "MEDIUM"),
+        "low":      sum(1 for v in vulns if v.get("severity") == "LOW"),
+    }
+
+def require_api_key(f):
+    """Optional API key middleware. Only enforced when PENTASCOPE_API_KEY env var is set."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if API_KEY and request.headers.get("X-API-Key") != API_KEY:
+            return jsonify({"error": "Unauthorized — set X-API-Key header"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+def schedule_cleanup(scan_id: str, delay: int = 300):
+    """Remove scan entry from memory after `delay` seconds (prevents memory leak)."""
+    import time
+    time.sleep(delay)
+    with scan_lock:
+        scan_progress.pop(scan_id, None)
+
+# ── Database Model ──────────────────────────────────
 class ScanResult(db.Model):
-    id          = db.Column(db.Integer, primary_key=True)
-    target      = db.Column(db.String(255))
-    scan_type   = db.Column(db.String(50))
-    findings    = db.Column(db.Text)
-    critical    = db.Column(db.Integer, default=0)
-    high        = db.Column(db.Integer, default=0)
-    medium      = db.Column(db.Integer, default=0)
-    low         = db.Column(db.Integer, default=0)
-    created_at  = db.Column(db.String(50))
+    id         = db.Column(db.Integer, primary_key=True, index=True)
+    target     = db.Column(db.String(255))
+    scan_type  = db.Column(db.String(50))
+    findings   = db.Column(db.Text)
+    critical   = db.Column(db.Integer, default=0)
+    high       = db.Column(db.Integer, default=0)
+    medium     = db.Column(db.Integer, default=0)
+    low        = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 with app.app_context():
     db.create_all()
 
-# ── Routes ─────────────────────────────────────────
+# ── Routes ──────────────────────────────────────────
 @app.route('/')
 def index():
     return jsonify({"message": "PentaScope API", "version": "1.0"})
 
 @app.route('/api/recon', methods=['POST'])
+@require_api_key
 def recon():
-    data   = request.get_json()
-    target = data.get('target')
-    if not target:
-        return jsonify({"error": "target required"}), 400
-    result = run_recon(target)
+    data   = request.get_json() or {}
+    target = data.get('target', '').strip()
+    if not target or not validate_target(target):
+        return jsonify({"error": "A valid http/https target URL is required"}), 400
 
-    # Save to DB
-    scan = ScanResult(
+    result = run_recon(target)
+    scan   = ScanResult(
         target=target, scan_type="recon",
-        findings=json.dumps(result),
-        created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+        findings=json.dumps(result)
     )
     db.session.add(scan)
     db.session.commit()
     return jsonify(result)
 
 @app.route('/api/scan', methods=['POST'])
+@require_api_key
 def scan():
-    data   = request.get_json()
-    target = data.get('target')
-    if not target:
-        return jsonify({"error": "target required"}), 400
-    result = run_vuln_scan(target)
+    data   = request.get_json() or {}
+    target = data.get('target', '').strip()
+    if not target or not validate_target(target):
+        return jsonify({"error": "A valid http/https target URL is required"}), 400
 
-    all_vulns = result.get("vulnerabilities",[]) + result.get("missing_headers",[])
+    result    = run_vuln_scan(target)
+    all_vulns = result.get("vulnerabilities", []) + result.get("missing_headers", [])
+    counts    = count_severities(all_vulns)
+
     scan = ScanResult(
         target=target, scan_type="vuln",
-        findings=json.dumps(result),
-        critical=sum(1 for v in all_vulns if v.get("severity")=="CRITICAL"),
-        high    =sum(1 for v in all_vulns if v.get("severity")=="HIGH"),
-        medium  =sum(1 for v in all_vulns if v.get("severity")=="MEDIUM"),
-        low     =sum(1 for v in all_vulns if v.get("severity")=="LOW"),
-        created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+        findings=json.dumps(result), **counts
     )
     db.session.add(scan)
     db.session.commit()
     return jsonify(result)
 
 @app.route('/api/history', methods=['GET'])
+@require_api_key
 def history():
-    scans = ScanResult.query.order_by(ScanResult.id.desc()).limit(20).all()
+    # Fixed: use SQLAlchemy 2.x style (no more .query deprecation)
+    scans = db.session.execute(
+        db.select(ScanResult).order_by(ScanResult.id.desc()).limit(20)
+    ).scalars().all()
     return jsonify([{
         "id":         s.id,
         "target":     s.target,
@@ -85,92 +143,125 @@ def history():
         "high":       s.high,
         "medium":     s.medium,
         "low":        s.low,
-        "created_at": s.created_at
+        "created_at": s.created_at.strftime("%Y-%m-%d %H:%M") if s.created_at else ""
     } for s in scans])
 
 @app.route('/api/history/<int:scan_id>', methods=['GET'])
+@require_api_key
 def history_detail(scan_id):
-    s = ScanResult.query.get_or_404(scan_id)
+    # Fixed: use SQLAlchemy 2.x db.get_or_404
+    s = db.get_or_404(ScanResult, scan_id)
     return jsonify(json.loads(s.findings))
 
 @app.route('/api/report', methods=['POST'])
+@require_api_key
 def report():
-    import os
-    from flask import send_file
-    data   = request.get_json()
-    target = data.get('target')
-    recon  = data.get('recon', {})
-    vulns  = data.get('vulns', {})
-    if not target:
-        return jsonify({"error": "target required"}), 400
-    rel_path = generate_report(target, recon, vulns)
-    abs_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", rel_path))
-    return send_file(abs_path, as_attachment=True, download_name="pentest_report.pdf", mimetype='application/pdf')
+    data       = request.get_json() or {}
+    target     = data.get('target', '').strip()
+    recon_data = data.get('recon', {})
+    vuln_data  = data.get('vulns', {})
+
+    if not target or not validate_target(target):
+        return jsonify({"error": "A valid http/https target URL is required"}), 400
+    try:
+        rel_path = generate_report(target, recon_data, vuln_data)
+        abs_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", rel_path))
+        return send_file(
+            abs_path, as_attachment=True,
+            download_name="pentest_report.pdf",
+            mimetype='application/pdf'
+        )
+    except Exception as e:
+        return jsonify({"error": f"Report generation failed: {str(e)}"}), 500
 
 @app.route('/api/export/json', methods=['POST'])
+@require_api_key
 def export_json():
-    data = request.get_json()
+    data = request.get_json() or {}
     return jsonify(data)
 
 @app.route('/api/export/csv', methods=['POST'])
+@require_api_key
 def export_csv():
-    data     = request.get_json()
-    vulns    = data.get("vulnerabilities",[]) + data.get("missing_headers",[])
+    data  = request.get_json() or {}
+    vulns = data.get("vulnerabilities", []) + data.get("missing_headers", [])
     csv_rows = ["Type,Severity,CVSS,Description,Remediation"]
     for v in vulns:
-        csv_rows.append(f"{v.get('type','')},{v.get('severity','')},{v.get('cvss','')},{v.get('description','')},{v.get('remediation','')}")
+        row = [
+            str(v.get('type',        '')).replace(',', ';'),
+            str(v.get('severity',    '')),
+            str(v.get('cvss',        '')),
+            str(v.get('description', '')).replace(',', ';'),
+            str(v.get('remediation', '')).replace(',', ';'),
+        ]
+        csv_rows.append(",".join(row))
     return "\n".join(csv_rows), 200, {"Content-Type": "text/csv"}
 
-import threading
-scan_progress = {}
-
 @app.route('/api/scan/progress', methods=['POST'])
+@require_api_key
 def scan_with_progress():
-    data   = request.get_json()
-    target = data.get('target')
-    if not target:
-        return jsonify({"error": "target required"}), 400
+    data   = request.get_json() or {}
+    target = data.get('target', '').strip()
+    if not target or not validate_target(target):
+        return jsonify({"error": "A valid http/https target URL is required"}), 400
 
-    scan_id = str(datetime.now().timestamp())
-    scan_progress[scan_id] = {"step": 0, "total": 10, "message": "Starting...", "done": False, "result": None}
+    # Use UUID instead of timestamp — prevents key collisions
+    scan_id = str(uuid.uuid4())
+    with scan_lock:
+        scan_progress[scan_id] = {
+            "step": 0, "total": 10,
+            "message": "Starting...",
+            "done": False, "result": None
+        }
 
     def run():
-        scan_progress[scan_id]["step"] = 1
-        scan_progress[scan_id]["message"] = "Running Reconnaissance..."
-        recon_result = run_recon(target)
+        with scan_lock:
+            scan_progress[scan_id]["step"]    = 1
+            scan_progress[scan_id]["message"] = "Running Reconnaissance..."
+        run_recon(target)
 
-        def update_progress(step, msg):
-            scan_progress[scan_id]["step"] = step
-            scan_progress[scan_id]["message"] = msg
+        def update_progress(step: int, msg: str):
+            with scan_lock:
+                scan_progress[scan_id]["step"]    = step
+                scan_progress[scan_id]["message"] = msg
 
         vuln_result = run_vuln_scan(target, progress_callback=update_progress)
-        all_vulns   = vuln_result.get("vulnerabilities",[]) + vuln_result.get("missing_headers",[])
+        all_vulns   = vuln_result.get("vulnerabilities", []) + vuln_result.get("missing_headers", [])
+        counts      = count_severities(all_vulns)
 
         scan = ScanResult(
             target=target, scan_type="vuln",
-            findings=json.dumps(vuln_result),
-            critical=sum(1 for v in all_vulns if v.get("severity")=="CRITICAL"),
-            high    =sum(1 for v in all_vulns if v.get("severity")=="HIGH"),
-            medium  =sum(1 for v in all_vulns if v.get("severity")=="MEDIUM"),
-            low     =sum(1 for v in all_vulns if v.get("severity")=="LOW"),
-            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+            findings=json.dumps(vuln_result), **counts
         )
         with app.app_context():
             db.session.add(scan)
             db.session.commit()
 
-        scan_progress[scan_id]["done"]    = True
-        scan_progress[scan_id]["result"]  = vuln_result
-        scan_progress[scan_id]["message"] = "Scan Complete!"
+        with scan_lock:
+            scan_progress[scan_id]["done"]    = True
+            scan_progress[scan_id]["result"]  = vuln_result
+            scan_progress[scan_id]["message"] = "Scan Complete!"
 
-    threading.Thread(target=run).start()
+        # Auto-cleanup after 5 minutes to prevent memory leak
+        threading.Thread(
+            target=schedule_cleanup, args=(scan_id,), daemon=True
+        ).start()
+
+    threading.Thread(target=run, daemon=True).start()
     return jsonify({"scan_id": scan_id})
 
 @app.route('/api/scan/status/<scan_id>', methods=['GET'])
 def scan_status(scan_id):
-    progress = scan_progress.get(scan_id)
+    with scan_lock:
+        progress = dict(scan_progress.get(scan_id, {}))
     if not progress:
-        return jsonify({"error": "scan not found"}), 404
+        return jsonify({"error": "Scan not found or expired"}), 404
     return jsonify(progress)
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    host       = os.environ.get("FLASK_HOST", "127.0.0.1")
+    port       = int(os.environ.get("FLASK_PORT", "5000"))
+    print(f"[*] PentaScope API starting — debug={debug_mode}, host={host}, port={port}")
+    print(f"[*] API Key auth: {'ENABLED' if API_KEY else 'DISABLED (set PENTASCOPE_API_KEY to enable)'}")
+    app.run(debug=debug_mode, host=host, port=port)

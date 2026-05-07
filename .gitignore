@@ -9,6 +9,11 @@ build/
 .eggs/
 *.egg
 
+# Environment secrets (never commit .env — only .env.example)
+.env
+.env.*
+!.env.example
+
 # Virtual Environment
 pentest-env/
 venv/

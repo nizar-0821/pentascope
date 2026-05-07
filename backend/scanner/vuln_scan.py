@@ -1,9 +1,11 @@
 import requests
 import json
 from urllib.parse import urlparse, parse_qs
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from crawler import crawl
+from typing import Callable, Optional
+try:
+    from .crawler import crawl  # package import
+except ImportError:
+    from crawler import crawl   # direct execution fallback
 
 CVE_MAP = {
     "SQL Injection": {
@@ -66,10 +68,10 @@ SQLI_ERRORS = [
     "quoted string not properly terminated", "mysql_num_rows"
 ]
 
-def test_sqli(url, endpoints):
+def test_sqli(url: str, endpoints: list) -> list:
     vulns = []
     if not endpoints:
-        endpoints = [{"url": url, "method": "get", "params": parse_qs(urlparse(url).query).keys() or ["id"]}]
+        endpoints = [{"url": url, "method": "get", "params": list(parse_qs(urlparse(url).query).keys()) or ["id"]}]
     for ep in endpoints:
         ep_url = ep["url"]
         method = ep.get("method", "get")
@@ -88,13 +90,14 @@ def test_sqli(url, endpoints):
                                 "remediation": "Use prepared statements and parameterized queries."
                             })
                             break
-                except: continue
+                except requests.RequestException:
+                    continue
     return vulns
 
-def test_xss(url, endpoints):
+def test_xss(url: str, endpoints: list) -> list:
     vulns = []
     if not endpoints:
-        endpoints = [{"url": url, "method": "get", "params": parse_qs(urlparse(url).query).keys() or ["q"]}]
+        endpoints = [{"url": url, "method": "get", "params": list(parse_qs(urlparse(url).query).keys()) or ["q"]}]
     for ep in endpoints:
         ep_url = ep["url"]
         method = ep.get("method", "get")
@@ -112,13 +115,14 @@ def test_xss(url, endpoints):
                             "remediation": "Encode output and implement CSP headers."
                         })
                         break
-                except: continue
+                except requests.RequestException:
+                    continue
     return vulns
 
-def test_open_redirect(url, endpoints):
+def test_open_redirect(url: str, endpoints: list) -> list:
     vulns = []
     if not endpoints:
-        endpoints = [{"url": url, "method": "get", "params": parse_qs(urlparse(url).query).keys() or ["redirect"]}]
+        endpoints = [{"url": url, "method": "get", "params": list(parse_qs(urlparse(url).query).keys()) or ["redirect"]}]
     payloads = ["https://evil.com", "//evil.com", "/\\evil.com"]
     params_filter = ["redirect", "url", "next", "return", "goto", "dest"]
     for ep in endpoints:
@@ -141,13 +145,14 @@ def test_open_redirect(url, endpoints):
                                 "description": f"Open redirect via '{param}' parameter at {ep_url}",
                                 "remediation": "Validate and whitelist redirect URLs."
                             })
-                except: continue
+                except requests.RequestException:
+                    continue
     return vulns
 
-def test_directory_traversal(url, endpoints):
+def test_directory_traversal(url: str, endpoints: list) -> list:
     vulns = []
     if not endpoints:
-        endpoints = [{"url": url, "method": "get", "params": parse_qs(urlparse(url).query).keys() or ["file"]}]
+        endpoints = [{"url": url, "method": "get", "params": list(parse_qs(urlparse(url).query).keys()) or ["file"]}]
     payloads = [
         "../../../../etc/passwd",
         "..%2F..%2F..%2Fetc%2Fpasswd",
@@ -169,13 +174,14 @@ def test_directory_traversal(url, endpoints):
                             "description": f"LFI detected via '{param}' at {ep_url}",
                             "remediation": "Sanitize file path inputs. Use allowlists."
                         })
-                except: continue
+                except requests.RequestException:
+                    continue
     return vulns
 
-def test_ssrf(url, endpoints):
+def test_ssrf(url: str, endpoints: list) -> list:
     vulns = []
     if not endpoints:
-        endpoints = [{"url": url, "method": "get", "params": parse_qs(urlparse(url).query).keys() or ["url"]}]
+        endpoints = [{"url": url, "method": "get", "params": list(parse_qs(urlparse(url).query).keys()) or ["url"]}]
     payloads = ["http://169.254.169.254/latest/meta-data/", "http://127.0.0.1", "http://localhost"]
     for ep in endpoints:
         ep_url = ep["url"]
@@ -193,13 +199,14 @@ def test_ssrf(url, endpoints):
                             "description": f"SSRF detected via '{param}' parameter at {ep_url}",
                             "remediation": "Whitelist allowed domains and block private IP ranges."
                         })
-                except: continue
+                except requests.RequestException:
+                    continue
     return vulns
 
-def test_command_injection(url, endpoints):
+def test_command_injection(url: str, endpoints: list) -> list:
     vulns = []
     if not endpoints:
-        endpoints = [{"url": url, "method": "get", "params": parse_qs(urlparse(url).query).keys() or ["cmd"]}]
+        endpoints = [{"url": url, "method": "get", "params": list(parse_qs(urlparse(url).query).keys()) or ["cmd"]}]
     payloads = ["; cat /etc/passwd", "| cat /etc/passwd", "`cat /etc/passwd`"]
     for ep in endpoints:
         ep_url = ep["url"]
@@ -217,10 +224,11 @@ def test_command_injection(url, endpoints):
                             "description": f"Command Injection detected via '{param}' parameter at {ep_url}",
                             "remediation": "Avoid passing user input to system shells. Use safe APIs."
                         })
-                except: continue
+                except requests.RequestException:
+                    continue
     return vulns
 
-def test_csrf(url):
+def test_csrf(url: str) -> list:
     issues = []
     try:
         r = requests.get(url, timeout=10)
@@ -235,7 +243,8 @@ def test_csrf(url):
                 "description": "Forms detected without CSRF tokens",
                 "remediation": "Implement CSRF tokens on all state-changing forms."
             })
-    except: pass
+    except requests.RequestException:
+        pass
     return issues
 
 def test_headers(url):
@@ -263,7 +272,7 @@ def test_headers(url):
         issues.append({"error": str(e)})
     return issues
 
-def run_vuln_scan(url, progress_callback=None):
+def run_vuln_scan(url: str, progress_callback: Optional[Callable] = None) -> dict:
     print(f"[*] Starting vulnerability scan on {url}...")
     results = {"target": url, "vulnerabilities": [], "missing_headers": []}
 
