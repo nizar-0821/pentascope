@@ -25,8 +25,8 @@ instance/
 *.db
 *.sqlite3
 
-# Generated Reports (PDFs locaux)
-reports/pentest_report.pdf
+# Generated Reports (PDFs locaux — UUID filenames included)
+reports/*.pdf
 reports/__pycache__/
 
 # Node / React

@@ -10,7 +10,7 @@
 |-------|-------|
 | **Project Name** | PentaScope |
 | **Tagline** | Automated Web Application Penetration Testing Framework |
-| **Version** | 1.0 Enterprise |
+| **Version** | 1.1 Enterprise |
 | **Author** | Nizar Oualidi |
 | **Context** | Cybersecurity Training Project (Projet de Fin de Formation — PFF) 2024/2025 |
 | **License** | MIT |
@@ -41,16 +41,18 @@ Manual penetration testing is time-consuming, inconsistent, and requires deep ex
 ### Backend
 | Technology | Version | Purpose |
 |-----------|---------|---------|
-| Python | 3.x | Core backend language |
+| Python | 3.11+ | Core backend language |
 | Flask | 3.x | REST API web framework |
 | Flask-CORS | latest | Enable cross-origin requests from React frontend |
-| Flask-SQLAlchemy | latest | ORM for SQLite database |
+| Flask-SQLAlchemy | latest | ORM for SQLite database (thread-safe config) |
+| flask-limiter | 3.5.0 | Rate limiting — 60 req/min per IP |
 | SQLite | built-in | Persistent scan history storage |
 | python-nmap | latest | Python wrapper for Nmap port scanning |
-| requests | latest | HTTP client for vulnerability testing |
-| BeautifulSoup4 (bs4) | latest | HTML parsing for web crawler |
+| aiohttp | 3.11+ | Async HTTP client for crawler and all vuln tests |
+| requests | latest | HTTP client (used in sync scope-check fallback) |
+| BeautifulSoup4 (bs4) | latest | HTML parsing for async web crawler |
 | ReportLab | latest | PDF generation for pentest reports |
-| threading | stdlib | Background scan execution |
+| asyncio | stdlib | True parallel I/O — all scan tests run simultaneously |
 
 ### Frontend
 | Technology | Version | Purpose |
@@ -93,26 +95,40 @@ Manual penetration testing is time-consuming, inconsistent, and requires deep ex
 ```
 pentest-framework/
 ├── README.md                          # Project overview, setup instructions
+├── .env.example                       # Environment variable template
+├── docker-compose.yml                 # Isolated network, health checks, named volumes
+├── .github/
+│   └── workflows/
+│       └── ci.yml                     # CI: lint + build + Docker smoke test
 ├── backend/
-│   ├── app.py                         # Flask REST API — all routes, DB model, threading
+│   ├── app.py                         # Flask REST API — routes, thread-safe DB, async scope check
+│   ├── Dockerfile                     # Includes nmap + subfinder binary (multi-arch v2.6.6)
+│   ├── requirements.txt               # Pinned Python dependencies
 │   └── scanner/
 │       ├── recon.py                   # Subdomain enum (subfinder) + port scan (nmap)
-│       ├── vuln_scan.py               # All vulnerability test modules + CVE/OWASP mapping
-│       └── crawler.py                 # BeautifulSoup HTML crawler — discovers endpoints & params
+│       ├── vuln_scan.py               # Async vuln engine — asyncio.gather() + CWE/OWASP mapping
+│       └── crawler.py                 # Async aiohttp BFS crawler — never blocks event loop
 ├── frontend/
-│   ├── package.json                   # NPM dependencies and scripts
+│   ├── package.json                   # NPM dependencies (name: "pentascope")
+│   ├── Dockerfile                     # Multi-stage build → nginx:alpine
 │   ├── public/
 │   │   └── cyber_bg.png              # Background image used in Hero section
 │   └── src/
 │       ├── index.js                   # React entry point — mounts <App /> to #root
 │       ├── index.css                  # Global CSS resets
-│       ├── App.js                     # Main React component (590 lines) — entire UI
-│       ├── App.css                    # CRA default CSS (largely unused; styling is inline)
-│       ├── App.test.js                # Default CRA test stub
-│       ├── reportWebVitals.js         # CRA performance reporting
-│       └── setupTests.js              # Jest/testing-library setup
+│       ├── utils.js                   # SEV color tokens + API base URL constant
+│       ├── App.js                     # Main layout + navigation (~200 lines)
+│       ├── hooks/
+│       │   └── useScan.js             # Custom hook — all scan state & API logic
+│       └── components/
+│           ├── LandingPage.jsx        # Animated entry/splash page
+│           ├── ProgressBar.jsx        # Real-time polling progress component
+│           ├── VulnCard.jsx           # Expandable finding card + PoC generator
+│           ├── AttackGraph.jsx        # Force-directed attack surface graph
+│           ├── HistoryView.jsx        # Paginated scan history (all severities)
+│           └── UI.jsx                 # Design system: Badge, StatCard, CvssBar, Section…
 ├── reports/
-│   ├── generator.py                   # ReportLab PDF report generator (286 lines)
+│   ├── generator.py                   # ReportLab PDF report generator
 │   └── pentest_report.pdf             # Last generated report output
 └── instance/
     └── pentascope.db                  # SQLite database (auto-created by Flask-SQLAlchemy)
@@ -122,13 +138,17 @@ pentest-framework/
 
 | File | Role |
 |------|------|
-| `backend/app.py` | Flask application factory. Defines `ScanResult` DB model, all API routes, background threading for async scans, and progress tracking via `scan_progress` dict. |
+| `backend/app.py` | Flask application factory. Defines `ScanResult` DB model, all API routes, thread-safe SQLite config (`check_same_thread=False`), async `check_scope()` via aiohttp, and background threading with `db.session.remove()`. |
 | `backend/scanner/recon.py` | Runs `subfinder` (subprocess) for subdomain discovery and `python-nmap` for top-100 port scan. Returns structured dict. |
-| `backend/scanner/vuln_scan.py` | 322-line vulnerability engine. Contains test functions for SQLi, XSS, Open Redirect, LFI/Path Traversal, SSRF, Command Injection, CSRF, and Security Headers. Also contains the `CVE_MAP` dict. |
-| `backend/scanner/crawler.py` | BeautifulSoup-based HTML crawler. Fetches the target URL, parses all `<form>` and `<a href>` elements, extracts parameter names, deduplicates, and returns a list of endpoint dicts. |
+| `backend/scanner/vuln_scan.py` | Fully async vulnerability engine. All 8 test suites run simultaneously via `asyncio.gather()`. Uses `VULN_META` dict with accurate CWE/OWASP references (no fabricated CVE numbers). |
+| `backend/scanner/crawler.py` | Fully async `aiohttp` BFS crawler. Scrapes pages concurrently without blocking the event loop. Parses `<form>` and `<a href>` elements, deduplicates by signature. |
+| `backend/Dockerfile` | Installs `nmap` via apt and downloads `subfinder` binary from GitHub releases (multi-arch: amd64/arm64, pinned v2.6.6). |
+| `docker-compose.yml` | Two-service stack on isolated `pentascope-net` bridge network. Backend not exposed to host. Named volumes for DB and reports. Backend health check before frontend starts. |
+| `.github/workflows/ci.yml` | 3-stage pipeline: (1) flake8 + pytest on Python 3.11/3.12, (2) ESLint + production build on Node 18/20, (3) Docker smoke test on main branch pushes. |
 | `reports/generator.py` | Builds a multi-page PDF using ReportLab. Includes a custom dark cover page, executive summary table, severity breakdown table, recon port table, per-vulnerability finding cards, and strategic recommendations. |
-| `frontend/src/App.js` | 590-line single-file React application. Contains: `LandingPage`, `App` (main), `VulnCard`, `AttackGraph`, `ProgressBar`, `StatCard`, `CvssBar`, `Badge`, `Section`, `FeatureCard`, `AccordionItem`, `FeatureCard` components. |
-| `frontend/src/index.js` | Standard CRA entry point — renders `<App />` inside `React.StrictMode`. |
+| `frontend/src/App.js` | ~200-line main layout component. Handles navigation (`scan`/`history` tabs) and delegates all scan logic to `useScan` hook. |
+| `frontend/src/hooks/useScan.js` | Custom React hook. Encapsulates all scan state (`target`, `scanning`, `scanId`, `results`), all API calls (`startScan`, `runRecon`, `downloadReport`), and derived values (`allVulns`, `counts`, `riskLabel`). |
+| `frontend/src/components/HistoryView.jsx` | Paginated scan history table showing all 4 severity levels (C/H/M/L), refresh button, PDF download per scan, and backwards-compatible with old flat API response. |
 | `instance/pentascope.db` | SQLite file auto-created by `db.create_all()` inside Flask app context. Stores all scan results. |
 
 ---
@@ -138,10 +158,31 @@ pentest-framework/
 ### Environment
 - **OS:** Kali Linux (running in VMware)
 - **Shell:** bash
-- **Python:** 3.x (system Python3)
+- **Python:** 3.11+ (system Python3)
 - **Virtual Environment path:** `~/pentest-env`
 
-### Step-by-Step Commands (in exact order)
+### Option A — Docker Compose (Recommended)
+
+```bash
+# 1. Clone / navigate to project
+git clone https://github.com/nizar-0821/pentascope.git
+cd pentascope
+
+# 2. (Optional) set environment variables
+cp .env.example .env
+
+# 3. Build and start the full stack
+docker compose up --build -d
+
+# Frontend: http://localhost:3000
+# Backend API: internal only (port 5000 not exposed to host)
+```
+
+> Docker images include `nmap` and `subfinder` — no manual system dependency installation needed.
+
+### Option B — Manual Setup
+
+#### Step-by-Step Commands (in exact order)
 
 ```bash
 # 1. Clone / navigate to project
@@ -151,31 +192,26 @@ cd ~/pentest-framework
 python3 -m venv ~/pentest-env
 source ~/pentest-env/bin/activate
 
-# 3. Install Python dependencies
-pip install flask flask-cors flask-sqlalchemy requests reportlab python-nmap
+# 3. Install ALL Python dependencies from requirements.txt
+pip install -r backend/requirements.txt
+# (includes: flask, flask-cors, flask-sqlalchemy, flask-limiter,
+#  requests, aiohttp, reportlab, python-nmap, beautifulsoup4, SQLAlchemy)
 
-# 4. Install BeautifulSoup4 (added later during development)
-~/pentest-env/bin/pip install beautifulsoup4
-
-# 5. Install Node.js dependencies (frontend)
+# 4. Install Node.js dependencies (frontend)
 cd frontend
 npm install
 
-# 6. Install additional React libraries (added during development)
-npm install react-force-graph-2d
-npm install framer-motion @splinetool/react-spline @splinetool/runtime lucide-react
-
-# 7. Start Docker DVWA test target (optional, for testing)
+# 5. Start Docker DVWA test target (optional, for testing)
 sudo docker run -d -p 8080:80 vulnerables/web-dvwa
 # OR restart existing container:
 sudo docker start $(sudo docker ps -aq)
 
-# 8. Start Flask backend (Terminal 1)
+# 6. Start Flask backend (Terminal 1)
 cd ~/pentest-framework
 source ~/pentest-env/bin/activate
 python3 backend/app.py
 
-# 9. Start React frontend (Terminal 2)
+# 7. Start React frontend (Terminal 2)
 cd ~/pentest-framework/frontend
 npm start
 ```
@@ -270,84 +306,87 @@ if __name__ == "__main__":
 
 ### 5.2 `backend/scanner/crawler.py`
 
-**Purpose:** Discovers parameterized endpoints on the target by parsing HTML. Finds form actions+inputs and anchor links with query strings.
+**Purpose:** Async BFS crawler. Discovers parameterized endpoints on the target by parsing HTML. Uses `aiohttp` so it never blocks the event loop. Finds form actions+inputs and anchor links with query strings across up to `max_depth=2` levels and `max_pages=20` pages.
+
+**Key design change from v1.0:** The original used the synchronous `requests` library and only scraped the base URL. v1.1 is a full BFS crawler using `aiohttp.ClientSession`, running entirely within the same event loop as the vulnerability tests.
 
 ```python
-import requests
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs
 
-def crawl(base_url):
-    print(f"[*] Crawling {base_url} for endpoints and parameters...")
-    discovered = []
+async def scrape_page(session, url):
+    """Async: scrapes a single page for forms and parameterised links."""
+    endpoints, links = [], []
     try:
-        r = requests.get(base_url, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
-
-        # Find all forms and their inputs
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            text = await r.text(errors="replace")
+        soup = BeautifulSoup(text, "html.parser")
+        # Forms
         for form in soup.find_all("form"):
             action = form.get("action")
             method = form.get("method", "get").lower()
-            target_url = urljoin(base_url, action) if action else base_url
-            
-            params = []
-            for input_tag in form.find_all(["input", "textarea", "select"]):
-                name = input_tag.get("name")
-                if name:
-                    params.append(name)
-            
+            target_url = urljoin(url, action) if action else url
+            params = [i.get("name") for i in form.find_all(["input","textarea","select"]) if i.get("name")]
             if params:
-                discovered.append({
-                    "url": target_url,
-                    "method": method,
-                    "params": params
-                })
-
-        # Find all links with query parameters
+                endpoints.append({"url": target_url, "method": method, "params": params})
+        # Links with query params (same domain only)
+        base_netloc = urlparse(url).netloc
         for a in soup.find_all("a", href=True):
-            href = a.get("href")
-            full_url = urljoin(base_url, href)
+            full_url = urljoin(url, a.get("href"))
             parsed = urlparse(full_url)
-            if parsed.netloc == urlparse(base_url).netloc:  # Stay on same domain
+            if parsed.netloc == base_netloc:
+                clean_url = full_url.split("#")[0]
+                links.append(clean_url)
                 if parsed.query:
-                    from urllib.parse import parse_qs
                     params = list(parse_qs(parsed.query).keys())
                     if params:
-                        clean_url = full_url.split('?')[0]
-                        discovered.append({
-                            "url": clean_url,
-                            "method": "get",
-                            "params": params
-                        })
-
+                        endpoints.append({"url": clean_url.split("?")[0], "method": "get", "params": params})
     except Exception as e:
-        print(f"[-] Crawler error: {str(e)}")
+        print(f"[-] Crawler error on {url}: {e}")
+    return endpoints, list(set(links))
 
+async def async_crawl(base_url, max_depth=2, max_pages=20):
+    """Async BFS — uses aiohttp so it never blocks the event loop."""
+    discovered, visited, queue = [], set(), [(base_url, 0)]
+    connector = aiohttp.TCPConnector(ssl=False, limit=10)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        while queue and len(visited) < max_pages:
+            current_url, depth = queue.pop(0)
+            if current_url in visited or depth > max_depth:
+                continue
+            visited.add(current_url)
+            endpoints, new_links = await scrape_page(session, current_url)
+            discovered.extend(endpoints)
+            if depth < max_depth:
+                queue.extend((l, depth+1) for l in new_links if l not in visited)
     # Deduplicate
-    unique_endpoints = []
-    seen = set()
+    unique, seen_sigs = [], set()
     for d in discovered:
         sig = f"{d['method']}:{d['url']}:{','.join(sorted(d['params']))}"
-        if sig not in seen:
-            seen.add(sig)
-            unique_endpoints.append(d)
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            unique.append(d)
+    return unique
 
-    print(f"[+] Crawler found {len(unique_endpoints)} parameterized endpoints")
-    return unique_endpoints
-
-if __name__ == "__main__":
-    import sys
-    import json
-    target = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8080"
-    res = crawl(target)
-    print(json.dumps(res, indent=2))
+def crawl(base_url, max_depth=2, max_pages=20):
+    """Synchronous wrapper kept for backward-compat with standalone scripts."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(async_crawl(base_url, max_depth, max_pages))
+    finally:
+        loop.close()
 ```
 
 **Function Reference:**
 
 | Function | Description |
 |----------|-------------|
-| `crawl(base_url)` | Fetches base URL with requests, parses HTML with BeautifulSoup. Extracts all `<form>` elements (action URL + method + input names) and all `<a href>` links with query parameters (same-domain only). Deduplicates by `method:url:params` signature. Returns list of `{"url", "method", "params"}` dicts. |
+| `scrape_page(session, url)` | Async. Fetches a page with `aiohttp`, parses with BeautifulSoup. Extracts all `<form>` endpoints and same-domain `<a href>` links with query params. |
+| `async_crawl(base_url)` | Async BFS. Visits up to `max_pages=20` pages at `max_depth=2`. Deduplicates endpoints by `method:url:params` signature. |
+| `crawl(base_url)` | Synchronous wrapper — creates a new event loop. Used by standalone scripts and legacy callers. |
 
 ---
 
@@ -683,24 +722,28 @@ if __name__ == "__main__":
 
 **Function Reference:**
 
-| Function | Severity | CVSS | Detection Method |
-|----------|----------|------|-----------------|
-| `test_sqli()` | CRITICAL | 9.8 | Injects 8 SQL payloads; checks response for 9 DB error strings |
-| `test_xss()` | HIGH | 7.2 | Injects 4 XSS payloads; checks if payload reflected verbatim in response |
-| `test_open_redirect()` | MEDIUM | 6.1 | Sends redirect payloads to `redirect/url/next/return/goto/dest` params; checks `Location` header |
-| `test_directory_traversal()` | CRITICAL | 9.1 | Sends LFI payloads; checks for `/etc/passwd` content in response |
-| `test_ssrf()` | HIGH | 8.6 | Sends internal IP payloads; checks for cloud metadata or localhost indicators |
-| `test_command_injection()` | CRITICAL | 9.8 | Sends `; cat /etc/passwd` variants; checks for `root:x:0:0` in response |
-| `test_csrf()` | HIGH | 8.0 | Checks if page has `<form>` but no CSRF token keyword |
-| `test_headers()` | MEDIUM/LOW | 3.1–6.1 | Checks for 6 missing HTTP security headers |
-| `run_vuln_scan()` | — | — | Orchestrator: calls crawler, then all test functions with progress callbacks; enriches results with CVE_MAP data |
+**v1.1 architecture change:** All 8 test functions are launched simultaneously using `asyncio.gather()` inside `async_run_vuln_scan()`. Payloads within each test are also gathered in parallel. This replaces the old sequential loop approach.
+
+**CVE references:** v1.0 used a `CVE_MAP` dict with fabricated CVE numbers (e.g. `CVE-2023-23397` is an Outlook vuln, not SQLi). v1.1 replaces this with `VULN_META` containing accurate CWE IDs and OWASP Top 10 2021 categories only — CVE numbers are software-version-specific and not reported for generic class-level findings.
+
+| Function | Severity | CVSS | CWE | Detection Method |
+|----------|----------|------|-----|------------------|
+| `test_sqli()` | CRITICAL | 9.8 | CWE-89 | Gathers all payload×param combos; checks responses for 9 DB error strings |
+| `test_xss()` | HIGH | 7.2 | CWE-79 | Gathers all payload×param combos; checks if payload reflected verbatim |
+| `test_open_redirect()` | MEDIUM | 6.1 | CWE-601 | Redirect params only; checks `Location` header for `evil.com` |
+| `test_directory_traversal()` | CRITICAL | 9.1 | CWE-22 | LFI payloads gathered; checks for `/etc/passwd` content |
+| `test_ssrf()` | HIGH | 8.6 | CWE-918 | Internal IP payloads gathered; checks for AWS metadata / localhost indicators |
+| `test_command_injection()` | CRITICAL | 9.8 | CWE-78 | Shell payloads gathered; checks for `root:x:0:0` in response |
+| `test_csrf()` | HIGH | 8.0 | CWE-352 | Checks if page has `<form>` but no CSRF token keyword |
+| `test_headers()` | MEDIUM/LOW | 3.1–6.1 | CWE-693 | Checks for 7 missing HTTP security headers (added `Permissions-Policy`) |
+| `run_vuln_scan()` | — | — | — | Sync entry point. Runs async pipeline: crawler → all tests via `asyncio.gather()` → enriches results with `VULN_META` |
 
 
 ---
 
 ### 5.4 `backend/app.py`
 
-**Purpose:** Flask REST API. 176 lines. Defines the database model, all API routes, and manages background scan threading with real-time progress tracking.
+**Purpose:** Flask REST API. ~240 lines (v1.1). Defines the database model, all API routes, thread-safe SQLite configuration, non-blocking async `check_scope()`, input validation, optional API key auth, rate limiting, and background scan threading with memory-leak prevention.
 
 ```python
 from flask import Flask, jsonify, request
@@ -885,15 +928,15 @@ if __name__ == '__main__':
 
 | Method | Route | Input (JSON body) | Output | Description |
 |--------|-------|-------------------|--------|-------------|
-| `GET` | `/` | — | `{"message": "PentaScope API", "version": "1.0"}` | Health check |
-| `POST` | `/api/recon` | `{"target": "domain.com"}` | `{"target", "subdomains": [], "ports": []}` | Run recon (subfinder + nmap), save to DB |
+| `GET` | `/` | — | `{"message": "PentaScope API", "version": "1.1"}` | Health check |
+| `POST` | `/api/recon` | `{"target": "domain.com", "force": false}` | `{"target", "subdomains": [], "ports": []}` | Run recon (subfinder + nmap), save to DB. `force=true` bypasses scope check. |
 | `POST` | `/api/scan` | `{"target": "http://..."}` | `{"target", "vulnerabilities": [], "missing_headers": [], "endpoints": []}` | Synchronous full vuln scan, save to DB |
-| `GET` | `/api/history` | — | `[{"id", "target", "scan_type", "critical", "high", "medium", "low", "created_at"}]` | Last 20 scans from DB |
+| `GET` | `/api/history` | `?page=1&limit=20` | `{"page", "limit", "total", "results": [{"id", "target", "scan_type", "critical", "high", "medium", "low", "created_at"}]}` | Paginated scan history from DB (max 100 per page) |
 | `GET` | `/api/history/<scan_id>` | — | Full findings JSON for that scan | Get detailed findings for a past scan |
 | `POST` | `/api/report` | `{"target", "recon": {}, "vulns": {}}` | PDF file (blob, `application/pdf`) | Generate and stream PDF report |
 | `POST` | `/api/export/json` | Any JSON object | Same JSON echoed back | JSON export passthrough |
-| `POST` | `/api/export/csv` | `{"vulnerabilities": [], "missing_headers": []}` | CSV text (`text/csv`) | Export findings as CSV |
-| `POST` | `/api/scan/progress` | `{"target": "http://..."}` | `{"scan_id": "timestamp_str"}` | Start async background scan, returns scan_id |
+| `POST` | `/api/export/csv` | `{"vulnerabilities": [], "missing_headers": []}` | CSV text (`text/csv`) with columns: Type, Severity, CVSS, CWE, OWASP, Description, Remediation | Export findings as CSV |
+| `POST` | `/api/scan/progress` | `{"target": "http://...", "force": false}` | `{"scan_id": "uuid4-str"}` | Start async background scan, returns UUID scan_id |
 | `GET` | `/api/scan/status/<scan_id>` | — | `{"step", "total", "message", "done", "result"}` | Poll progress of background scan |
 
 ---
@@ -915,7 +958,7 @@ if __name__ == '__main__':
 | `high` | INTEGER | default=0 | Count of HIGH severity findings |
 | `medium` | INTEGER | default=0 | Count of MEDIUM severity findings |
 | `low` | INTEGER | default=0 | Count of LOW severity findings |
-| `created_at` | VARCHAR(50) | — | Timestamp string `"YYYY-MM-DD HH:MM"` |
+| `created_at` | DATETIME | default=`datetime.now(timezone.utc)`, indexed | UTC timestamp of scan creation |
 
 ---
 
@@ -928,22 +971,22 @@ if __name__ == '__main__':
 - **Issues:** None major. subfinder must be installed system-wide on Kali.
 
 ### Feature 2: Web Crawler
-- **What it does:** Automatically discovers parameterized endpoints (forms and query-string links) on the target before vulnerability testing.
+- **What it does:** Automatically discovers parameterized endpoints (forms and query-string links) across multiple pages of the target before vulnerability testing.
 - **Files:** `backend/scanner/crawler.py`, imported by `vuln_scan.py`
-- **How implemented:** `requests.get()` fetches base URL; BeautifulSoup parses `<form>` elements (extracting action, method, input names) and `<a href>` links with query parameters. Stays on same domain. Deduplicates by signature.
-- **Issues:** Only works on server-rendered HTML. SPAs (React/Angular) will not expose their routes to this crawler.
+- **How implemented (v1.1):** Fully async `aiohttp` BFS crawler. `async_crawl()` visits up to 20 pages at depth 2 using `aiohttp.ClientSession`. `scrape_page()` parses `<form>` and `<a href>` elements asynchronously. Never blocks the event loop. Deduplicates by signature.
+- **v1.0 limitation fixed:** Old version used synchronous `requests.get()` and only scraped the base URL (depth 0).
 
 ### Feature 3: Vulnerability Scanner (8 modules)
-- **What it does:** Tests for SQLi, XSS, Open Redirect, LFI, SSRF, Command Injection, CSRF, and missing security headers.
+- **What it does:** Tests for SQLi, XSS, Open Redirect, LFI, SSRF, Command Injection, CSRF, and missing security headers (7 headers).
 - **Files:** `backend/scanner/vuln_scan.py`
-- **How implemented:** Each test function iterates over crawler-discovered endpoints and parameter names, injecting payloads and checking responses.
-- **Issues:** Synchronous; large sites can be slow. WAFs will block payloads on real targets.
+- **How implemented (v1.1):** All 8 test suites and all payloads within each suite run simultaneously via `asyncio.gather()` in a single aiohttp session. Results are merged and enriched with CWE/OWASP metadata from `VULN_META`.
+- **v1.0 limitation fixed:** Old version ran tests sequentially with synchronous `requests`. Large sites could take minutes; now runs in seconds.
 
 ### Feature 4: Real-time Progress Bar
 - **What it does:** Shows live scan progress (step X of 10) with status messages in the React UI.
-- **Files:** `backend/app.py` (`scan_with_progress`, `scan_status`), `frontend/src/App.js` (`ProgressBar` component)
-- **How implemented:** Backend starts scan in a `threading.Thread`. Frontend polls `/api/scan/status/<scan_id>` every 600ms. `vuln_scan.py` accepts `progress_callback` and calls it before each test module.
-- **Bugs fixed:** Original implementation used `time.sleep()` fake steps; replaced with real callback system.
+- **Files:** `backend/app.py` (`scan_with_progress`, `scan_status`), `frontend/src/components/ProgressBar.jsx`
+- **How implemented:** Backend starts scan in a `threading.Thread`. Frontend polls `/api/scan/status/<scan_id>` every 600ms. `vuln_scan.py` accepts `progress_callback` and calls it at key stages.
+- **v1.1 improvements:** Scan ID is now a UUID4 (prevents timestamp collisions). Memory auto-cleaned after 5 min via `schedule_cleanup`. Thread safety via `scan_lock` mutex.
 
 ### Feature 5: Interactive Attack Graph (Topology Map)
 - **What it does:** Renders an interactive 2D force-directed node graph showing the target, discovered endpoints, parameters, and vulnerabilities as connected nodes.
@@ -953,9 +996,8 @@ if __name__ == '__main__':
 
 ### Feature 6: PoC Exploit Generator
 - **What it does:** Generates a ready-to-run Python exploit script for any vulnerability with one click.
-- **Files:** `frontend/src/App.js` (`generatePoC()` inside `VulnCard`)
-- **How implemented:** Client-side JS function builds a Python script string using the vuln's `url`, `method`, `param`, and `payload`. Creates a Blob, generates an object URL, triggers browser download as `.py` file.
-- **Issues:** None. Purely client-side.
+- **Files:** `frontend/src/components/VulnCard.jsx` (`generatePoC()` function)
+- **How implemented:** Client-side JS function builds a Python script string using the vuln's `url`, `method`, `param`, and `payload`. Creates a Blob, generates an object URL, triggers browser download as `.py` file. Also calls `URL.revokeObjectURL()` to prevent memory leaks.
 
 ### Feature 7: PDF Report Generation
 - **What it does:** Generates a multi-page, corporate-grade PDF report with cover page, executive summary, severity tables, per-finding cards, and strategic recommendations.
@@ -965,14 +1007,13 @@ if __name__ == '__main__':
 
 ### Feature 8: CSV / JSON Export
 - **What it does:** Exports all vulnerability findings as a downloadable CSV or JSON file.
-- **Files:** `backend/app.py` (`/api/export/csv`, `/api/export/json`), `frontend/src/App.js`
-- **How implemented:** CSV endpoint builds a plain-text CSV string server-side. JSON endpoint simply echoes the posted data. Frontend creates blob and triggers download.
+- **Files:** `backend/app.py` (`/api/export/csv`, `/api/export/json`)
+- **v1.1:** CSV now includes CWE and OWASP columns (7 columns total vs 5 in v1.0). Frontend uses `URL.revokeObjectURL()` after download.
 
 ### Feature 9: Classic Luxury Futuristic UI
 - **What it does:** Full application redesign: animated landing/splash page, Framer Motion scroll animations, glassmorphism cards, 3D Spline background in hero, feature sections, accordion FAQ, and dark premium color scheme.
-- **Files:** `frontend/src/App.js` (full rewrite)
-- **How implemented:** `LandingPage` component with `AnimatePresence` exit animation. Hero with `cyber_bg.png` background + CSS gradient overlays. `framer-motion` `motion.div` with `variants` for staggered animations. Lucide React icons. `@splinetool/react-spline` for 3D scene.
-- **UI evolution:** Went through 3 design iterations: (1) original plain dark, (2) Neon Hacker/Matrix (too "over"), (3) final Classic Luxury Futuristic (current — approved by user).
+- **Files:** `frontend/src/App.js`, `frontend/src/hooks/useScan.js`, `frontend/src/components/`
+- **v1.1 refactor:** `App.js` reduced from 590 to ~200 lines by extracting all scan logic into `useScan.js` custom hook and all UI primitives into dedicated component files (`VulnCard.jsx`, `AttackGraph.jsx`, `HistoryView.jsx`, `LandingPage.jsx`, `ProgressBar.jsx`, `UI.jsx`).
 
 ---
 
@@ -1000,15 +1041,12 @@ if __name__ == '__main__':
 python3 -m venv ~/pentest-env
 source ~/pentest-env/bin/activate
 
-# Install Python packages
-pip install flask flask-cors flask-sqlalchemy requests reportlab python-nmap
-~/pentest-env/bin/pip install beautifulsoup4
+# Install ALL Python packages from requirements.txt
+pip install -r backend/requirements.txt
 
 # Install Node packages
 cd ~/pentest-framework/frontend
 npm install
-npm install react-force-graph-2d
-npm install framer-motion @splinetool/react-spline @splinetool/runtime lucide-react
 ```
 
 ### Daily Run Commands
@@ -1049,7 +1087,19 @@ curl -X POST -H "Content-Type: application/json" \
 
 ### Docker Commands
 ```bash
-# Pull and run DVWA
+# Build and start the full PentaScope stack
+docker compose up --build -d
+
+# Stop the stack
+docker compose down
+
+# Rebuild only the backend after code changes
+docker compose up --build -d backend
+
+# View backend logs live
+docker compose logs -f backend
+
+# Pull and run DVWA test target separately
 sudo docker run -d -p 8080:80 vulnerables/web-dvwa
 
 # List running containers
@@ -1057,9 +1107,6 @@ sudo docker ps
 
 # Stop all containers
 sudo docker stop $(sudo docker ps -aq)
-
-# Start existing containers
-sudo docker start $(sudo docker ps -aq)
 ```
 
 ---
@@ -1068,16 +1115,19 @@ sudo docker start $(sudo docker ps -aq)
 
 ### Python (pip) — Backend
 
-| Package | Purpose |
-|---------|---------|
-| `flask` | REST API web framework |
-| `flask-cors` | CORS headers so React frontend can call backend |
-| `flask-sqlalchemy` | SQLAlchemy ORM integration for Flask |
-| `requests` | HTTP client for all vulnerability probe requests |
-| `beautifulsoup4` | HTML parsing in crawler module |
-| `reportlab` | PDF generation (cover page, tables, paragraphs) |
-| `python-nmap` | Python binding for Nmap port scanner |
-| `sqlite3` | Built into Python stdlib — no separate install needed |
+| Package | Version | Purpose |
+|---------|---------|----------|
+| `flask` | 3.1.3 | REST API web framework |
+| `flask-cors` | 6.0.2 | CORS headers so React frontend can call backend |
+| `flask-sqlalchemy` | 3.1.1 | SQLAlchemy ORM integration for Flask |
+| `flask-limiter` | 3.5.0 | Rate limiting — 60 req/min per IP, graceful fallback |
+| `aiohttp` | 3.11.11 | Async HTTP client for crawler and all vuln test suites |
+| `requests` | 2.33.1 | Sync HTTP client (fallback usage) |
+| `beautifulsoup4` | 4.14.3 | HTML parsing in async crawler module |
+| `reportlab` | 4.5.0 | PDF generation (cover page, tables, paragraphs) |
+| `python-nmap` | 0.7.1 | Python binding for Nmap port scanner |
+| `SQLAlchemy` | 2.0.49 | ORM core (SQLAlchemy 2.x style queries used) |
+| `sqlite3` | stdlib | Built into Python — no separate install needed |
 
 ### NPM — Frontend
 
@@ -1135,15 +1185,12 @@ sudo docker start $(sudo docker ps -aq)
 | Issue | Status | Notes |
 |-------|--------|-------|
 | Crawler does not handle SPAs (React/Angular) | Known limitation | Would require Selenium/Playwright for JS rendering |
-| Scanner is synchronous (slow on large sites) | Known limitation | Future: asyncio + aiohttp for parallel requests |
 | WAFs will block payloads on real targets | By design | Educational tool; WAF evasion out of scope |
 | `scan_progress` dict is in-memory only | Known | Lost on server restart; future: Redis or DB-backed |
-| No authentication on API | Known | All endpoints open; future: JWT auth |
-| `history_detail` uses deprecated `get_or_404` | Minor | SQLAlchemy 2.x prefers `session.get()` with manual 404 |
-| `ScanResult.query` deprecated in SQLAlchemy 2.x | Minor | Should use `db.session.execute(db.select(ScanResult))` |
+| No authentication on API by default | Configurable | Set `PENTASCOPE_API_KEY` env var to enable X-API-Key auth |
 | PDF recon section empty if recon not run before scan | Known | `/api/report` takes `recon` as optional param; defaults to `{}` |
 | CSRF test only checks the base URL | Limitation | Does not crawl all form pages |
-| No rate limiting / timeout on scan threads | Risk | Multiple concurrent scans could exhaust resources |
+| Crawler only works on server-rendered HTML | Known | SPAs with client-side routing expose no links to the BFS crawler |
 
 ---
 
@@ -1178,4 +1225,4 @@ PentaScope is developed and maintained **strictly for educational purposes**. Al
 
 ---
 
-*Documentation generated: 2026-05-07. Project: PentaScope v1.0 Enterprise. Author: Nizar Oualidi.*
+*Documentation updated: 2026-05-08. Project: PentaScope v1.1 Enterprise. Author: Nizar Oualidi.*

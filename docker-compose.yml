@@ -1,23 +1,56 @@
 version: '3.8'
 
+# Isolated internal network — only the frontend port (3000) is exposed
+# to the host. The backend is reachable only via the internal network.
+networks:
+  pentascope-net:
+    driver: bridge
+
 services:
   backend:
     build: ./backend
-    ports:
-      - "5000:5000"
+    container_name: pentascope-backend
+    restart: unless-stopped
     environment:
       - FLASK_ENV=production
       - FLASK_DEBUG=false
       - FLASK_HOST=0.0.0.0
-      - ALLOWED_ORIGINS=http://localhost:3000
+      - FLASK_PORT=5000
+      # Restrict CORS to the frontend container only (internal hostname)
+      - ALLOWED_ORIGINS=http://localhost:3000,http://frontend:80
+      # Uncomment to enable API key auth:
+      # - PENTASCOPE_API_KEY=your-secret-key-here
     volumes:
-      - ./backend/reports:/app/reports
-      - ./backend/instance:/app/instance
+      - scan_reports:/app/reports
+      - scan_db:/app/instance
+    networks:
+      - pentascope-net
+    # Backend is NOT exposed to the host — only reachable via the internal network
+    expose:
+      - "5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   frontend:
     build:
       context: ./frontend
       args:
+        # Point to the backend via the Docker internal DNS name
         - REACT_APP_API_URL=http://localhost:5000
+    container_name: pentascope-frontend
+    restart: unless-stopped
     ports:
       - "3000:80"
+    networks:
+      - pentascope-net
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  scan_reports:
+  scan_db:
