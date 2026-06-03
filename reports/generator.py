@@ -84,8 +84,9 @@ def draw_header_footer(canvas, doc):
 
 def generate_report(target: str, recon_data: dict, vuln_data: dict, output_path: str = None) -> str:
     if output_path is None:
-        os.makedirs("reports", exist_ok=True)
-        output_path = f"reports/report_{uuid.uuid4().hex}.pdf"
+        reports_dir = os.path.dirname(os.path.abspath(__file__))
+        os.makedirs(reports_dir, exist_ok=True)
+        output_path = os.path.join(reports_dir, f"report_{uuid.uuid4().hex}.pdf")
     doc = SimpleDocTemplate(output_path, pagesize=A4,
                             leftMargin=2*cm, rightMargin=2*cm,
                             topMargin=2.5*cm, bottomMargin=2.5*cm)

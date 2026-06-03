@@ -256,8 +256,7 @@ def report():
     if not target or not validate_target(target):
         return jsonify({"error": "A valid http/https target URL is required"}), 400
     try:
-        rel_path = generate_report(target, recon_data, vuln_data)
-        abs_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", rel_path))
+        abs_path = generate_report(target, recon_data, vuln_data)
         return send_file(
             abs_path,
             as_attachment=True,
